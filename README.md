@@ -1,37 +1,114 @@
-# Orchestrator–Worker Skills
+# Multi-Agent Code Workflow Skills
 
-Two personal skills I made for my own AI coding workflow. This repository stores the skills and explains how I use them.
+Three skills for an automated, multi-model AI coding workflow: one model plans and reviews, a cheaper model writes the code, and a stronger model is called only for the risky parts. This repository stores the skills and explains how the pieces fit together.
 
 ## What's included
 
-- [orchestrator](orchestrator/SKILL.md): reads the repository context, decides on an approach, and prepares a `WORK ORDER`. Its role is read-only: it does not edit files or run tests/builds.
-- [worker](worker/SKILL.md): carries out the work order within its scope, validates the results, and returns a `WORKER REPORT`.
+- [orchestrator](orchestrator.md): plans the whole project once, keeps a persistent project state, schedules tasks by dependency, delegates them, routes results to review, handles retries, and writes the final summary. It does not write production code.
+- [worker](worker.md): stateless. Receives **one** task spec plus project context, implements it, and returns compact search/replace edits plus a one-paragraph summary.
+- [reviewer](reviewer.md): two roles in one file. **Part A** is the default review (plan conformance only). **Part B** is the escalation review (security, concurrency, deserialisation, database migrations, performance).
 
-The skills are used in separate chats. Work orders and reports are copied and pasted manually; there is no automatic communication between models.
+## Models and roles
 
-## How to use
+| Role | Model | Skill |
+|---|---|---|
+| Orchestrator + default reviewer | Gemini 4 Carbon | `orchestrator.md`, `reviewer.md` Part A |
+| Worker | DeepSeek V4.1 Flash 1017 | `worker.md` |
+| Escalation reviewer | Gemini 4 Argon | `reviewer.md` Part B |
 
-1. Activate `orchestrator` in the first chat and describe the task.
-2. Copy the entire resulting `WORK ORDER` into a second chat using `worker`.
-3. The worker carries out the task and returns a `WORKER REPORT` with the results, validation, and any blockers.
-4. Review the results yourself, or copy the report back to the orchestrator if you want a review.
+Model names and prices are as of Nov 16, 2026. Swap them freely; the skills do not depend on a specific model.
 
-If there is not enough evidence to decide on an implementation, the orchestrator can issue a `DISCOVERY` task: gathering information without changing files or persistent state. An `IMPLEMENTATION` task allows changes within the boundaries specified in the work order.
+## How it works
 
-Work orders and reports use English; the surrounding conversation follows the user's language.
+```
+Carbon (orchestrator)  ->  1017 (worker)  ->  Carbon (review)  ->  pass          -> next task
+ plan, state,               one task,          plan conformance     flagged       -> back to worker (max 2 retries)
+ delegate                   edits + summary    only                 escalated     -> Argon (deep review) -> pass / fail
+```
+
+1. **Plan (turn 1, once).** Carbon decomposes the whole project into an ordered task list with dependencies, acceptance criteria, expected files and risk tags.
+2. **Each later turn.** Carbon reads the state, reviews any returned worker output, updates state, and delegates every task whose dependencies are `done`. Independent tasks (no shared files) run in parallel.
+3. **Worker.** Implements exactly one task and returns edits, a summary, deviations, a self-reported sensitivity tag, and a status (`done` or `blocked` with a question).
+4. **Review.** Carbon checks the output against its own plan and acceptance criteria. It does not hunt for runtime bugs or security flaws.
+5. **Escalation.** Argon is called only for tasks tagged `auth`, `concurrency`, `deserialisation` or `db_migration`, or when Carbon flags a concrete deep concern. Typically 5-10% of tasks. Argon receives a small slice (Carbon's summary, the flagged hunk, the task spec; about 50K tokens max), never the full codebase.
+6. **Retries and humans.** A failed review goes back to the worker with only the specific issues. After 2 failed retries the task is `blocked` and the orchestrator asks you what to do (retry with guidance, skip, or amend the plan).
+7. **Done.** When every task is `done` or `failed`, the orchestrator writes a final summary and the run ends.
+
+### Review results
+
+| Result | Meaning | Next step |
+|---|---|---|
+| `pass` | All criteria met, no conformance issues | task `done` |
+| `flagged` | Conformance failure | retry worker with the listed issues |
+| `escalated` | Conformance is clean and deep review is required | send to Argon |
+
+## Project state
+
+The orchestrator works from a persistent state object that the harness re-sends every turn:
+
+```json
+{
+  "project": "name",
+  "tasks": [
+    {
+      "id": 1, "title": "...", "spec": "...",
+      "status": "pending | in_progress | blocked | failed | done",
+      "depends_on": [], "acceptance_criteria": ["..."],
+      "risk_tags": [], "files": [],
+      "worker_output": "diff + summary",
+      "review_result": null, "retry_count": 0, "feedback": null
+    }
+  ],
+  "current_task": 2, "completed": [1], "blocked": [], "escalations": []
+}
+```
+
+To maximise prompt-cache hits, the harness assembles every prompt in a fixed order: skill and project spec (frozen), plan (frozen), ledger of completed tasks (append-only), live state (the only mutable part), then the current turn input. The orchestrator emits small `<state_patch>` and `<delegate>` blocks instead of re-sending state or context.
+
+## Message formats
+
+| Block | Emitted by | Purpose |
+|---|---|---|
+| `<plan>` | Carbon | one-time task list |
+| `<delegate>` | Carbon | one task for the worker (spec, files, criteria, feedback on retries) |
+| `<state_patch>` | Carbon | state changes only |
+| `=== EDIT / NEW / DELETE / SUMMARY / DEVIATIONS / SENSITIVE / STATUS` | worker | search/replace edits and report |
+| `<review>` | Carbon | `pass` / `flagged` / `escalated` with specific issues |
+| `<argon_verdict>` | Argon | `pass` / `fail` / `need_context` with findings |
+
+The worker uses search/replace blocks instead of unified diffs: they are smaller and do not depend on line numbers, which models often get wrong.
+
+Machine blocks and instructions to other models are in English. Messages to the human (questions, checkpoints, final summary) follow the user's language.
+
+## What you need to provide (the harness)
+
+The skills define behaviour, not plumbing. You need a script or app that:
+
+- builds each prompt in the cache-friendly order above and puts the `<delegate>` block last in the worker prompt;
+- calls the models (one call per delegated task, in parallel when allowed) and parses the blocks;
+- applies `<state_patch>` and fills in `worker_output`;
+- applies the worker's edits to the working tree, rejecting any edit whose SEARCH text is missing or not unique, and keeps the cumulative diff per task for review;
+- builds Argon's input from Carbon's summary, the flagged hunk and the task spec, and enforces the ~50K token cap;
+- enforces the retry cap and the parallelism cap (default 3), and relays human questions and answers.
 
 ## Installation
 
-Copy the `orchestrator` and `worker` folders into the skills directory supported by your application. For applications that support `~/.agents/skills`, run these commands from the root of this repository:
+Load each skill as the system prompt for its model. For `reviewer.md`, give Carbon **Part A** and Argon **Part B** to save tokens (each part is self-contained).
+
+If your application uses a skills directory instead, copy each file into its own folder as `SKILL.md`. For applications that support `~/.agents/skills`, run this from the root of this repository:
 
 ```sh
-mkdir -p ~/.agents/skills
-cp -R -i orchestrator ~/.agents/skills/
-cp -R -i worker ~/.agents/skills/
+mkdir -p ~/.agents/skills/orchestrator ~/.agents/skills/worker ~/.agents/skills/reviewer
+cp -i orchestrator.md ~/.agents/skills/orchestrator/SKILL.md
+cp -i worker.md ~/.agents/skills/worker/SKILL.md
+cp -i reviewer.md ~/.agents/skills/reviewer/SKILL.md
 ```
 
-The `-i` option asks for confirmation before overwriting existing files. Reload the skills as required by your application. Installation paths and frontmatter support may differ between applications.
+The `-i` option asks for confirmation before overwriting existing files. In this layout the whole `reviewer` file loads for both roles, which works because each role reads only its own part. Installation paths and frontmatter support may differ between applications.
 
 ## Notes
 
-These are instructions for the model, not tool permission controls. To keep the orchestrator strictly read-only, disable tools that can modify files or state in your application. The worker's output and validation claims still need to be checked.
+- These are instructions for the models, not enforcement. Caps (retries, Argon input size, file-overlap checks) and permissions should also be enforced by the harness.
+- The orchestrator is meant to stay out of the code. Give it no file-writing or build tools.
+- Worker self-reports (`SUMMARY`, `SENSITIVE`) are hints. Carbon verifies them against the diff, and you should still check the final results and run your own tests.
+- Skill text is in English for the models. Adjust the language rule if you want a different default for human-facing messages.
