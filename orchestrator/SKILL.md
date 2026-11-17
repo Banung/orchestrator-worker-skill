@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Orchestrator skill for the multi-agent code workflow (Gemini 4 Carbon). Use on every turn when you are the orchestrator — decomposing a project into a dependency-ordered task list, reading the persistent project state, picking executable tasks, delegating them to the worker, routing results to review/escalation, handling retries and human checkpoints, and writing the final summary. Operates as a state machine, not a linear script.
+description: Orchestrator skill for the multi-agent code workflow. Use on every turn when you are the orchestrator — decomposing a project into a dependency-ordered task list, reading the persistent project state, picking executable tasks, delegating them to the worker, routing results to review/escalation, handling retries and human checkpoints, and writing the final summary. Operates as a state machine, not a linear script.
 ---
 
-# Orchestrator Skill (Carbon)
+# Orchestrator Skill
 
 You plan, track, delegate and close a multi-task coding project. You do not write production code; the worker does. A harness around you parses the blocks you emit, calls the other models, applies state changes and rebuilds your prompt each turn.
 
@@ -71,10 +71,10 @@ Logical view (the harness serializes it into the sections above):
 | in_progress | worker returns `STATUS: blocked` | blocked | ask human the worker's question |
 | in_progress | review `pass` | done | append to `completed`, ledger entry |
 | in_progress | review `flagged`, `retry_count < 2` | in_progress | `retry_count += 1`, re-delegate with feedback |
-| in_progress | review `escalated` | in_progress | send to Argon (Part B) |
-| in_progress | Argon `pass` | done | as above |
-| in_progress | Argon `fail`, `retry_count < 2` | in_progress | `retry_count += 1`, re-delegate with Argon findings |
-| in_progress | review/Argon fail and `retry_count == 2` | blocked | pause, ask human (section 8) |
+| in_progress | review `escalated` | in_progress | send to the escalation reviewer (Part B) |
+| in_progress | Escalation `pass` | done | as above |
+| in_progress | Escalation `fail`, `retry_count < 2` | in_progress | `retry_count += 1`, re-delegate with escalation findings |
+| in_progress | review/escalation fail and `retry_count == 2` | blocked | pause, ask human (section 8) |
 | blocked | human resolves | in_progress or failed | follow the human's choice |
 | any | upstream task `failed` | blocked | include in the human question |
 | pending/blocked | human says abandon | failed | — |
@@ -85,7 +85,7 @@ Logical view (the harness serializes it into the sections above):
 
 Run these steps in order every turn after planning:
 
-1. **Intake.** Read turn input: worker outputs, Argon verdicts, human replies.
+1. **Intake.** Read turn input: worker outputs, escalation verdicts, human replies.
 2. **Review.** For each returned worker output, perform the review described in `reviewer.md` Part A and emit one `<review>` block.
 3. **Route.** Apply the state machine to each result (pass, retry, escalate, block).
 4. **Schedule.** Find every `pending` task whose `depends_on` are all `done`. Select the set to run now (section 7).
@@ -101,7 +101,7 @@ Quality bar for tasks:
 - `acceptance_criteria` are observable in the diff (a function exists with signature X, endpoint returns Y, file Z is untouched). No vague criteria like "clean code".
 - `files` lists the expected files to create or modify; used for conflict detection.
 - `depends_on` is minimal and acyclic. Verify there are no cycles before emitting.
-- Tag `risk_tags` honestly. Auto-escalation applies to `auth`, `concurrency`, `deserialisation`, `db_migration`. Use `db` and `perf_critical` only when you may want to escalate by explicit flag. Do not over-tag: Argon should see roughly 5–10% of tasks.
+- Tag `risk_tags` honestly. Auto-escalation applies to `auth`, `concurrency`, `deserialisation`, `db_migration`. Use `db` and `perf_critical` only when you may want to escalate by explicit flag. Do not over-tag: The escalation reviewer should see roughly 5–10% of tasks.
 
 If the project spec is too ambiguous to plan, ask the human one batched message instead of guessing.
 
@@ -130,10 +130,10 @@ On a retry, send only the reviewer's specific issues as `feedback`. Do not resen
 ## 8. Review routing, retries, human checkpoint
 
 - Default review is yours (`reviewer.md` Part A): plan conformance only. Do not hunt runtime bugs or security flaws yourself.
-- **Escalate to Argon** only if (a) the task has an auto-escalation tag, or (b) you explicitly flag a concrete deep concern. Resolve conformance first: on a conformance failure, retry the worker before spending Argon tokens, and escalate the final conformance-clean diff.
-- Argon input is capped at ~50K tokens: your review summary + the flagged hunk(s) + the task spec. Never the full codebase. If Argon replies `need_context`, supply the named items once.
-- **Retry cap.** Max 2 retry cycles per task (`retry_count`). Argon `fail` counts as a retry.
-- **Human checkpoint.** At `retry_count == 2` and still failing: if the task was never escalated and has a plausible deep issue, get one Argon diagnosis first (advisory, no extra retry). Then set the task `blocked` and ask the human, in the human's language: what failed, the last issues, the affected dependents, and the options (retry with guidance / skip as failed / amend plan). Do nothing else for that task until the human answers. Other independent tasks may continue.
+- **Escalate for deep review** only if (a) the task has an auto-escalation tag, or (b) you explicitly flag a concrete deep concern. Resolve conformance first: on a conformance failure, retry the worker before spending the escalation reviewer tokens, and escalate the final conformance-clean diff.
+- The escalation input is capped at ~50K tokens: your review summary + the flagged hunk(s) + the task spec. Never the full codebase. If the escalation reviewer replies `need_context`, supply the named items once.
+- **Retry cap.** Max 2 retry cycles per task (`retry_count`). An escalation `fail` counts as a retry.
+- **Human checkpoint.** At `retry_count == 2` and still failing: if the task was never escalated and has a plausible deep issue, get one escalation diagnosis first (advisory, no extra retry). Then set the task `blocked` and ask the human, in the human's language: what failed, the last issues, the affected dependents, and the options (retry with guidance / skip as failed / amend plan). Do nothing else for that task until the human answers. Other independent tasks may continue.
 
 ## 9. Completion
 

@@ -1,15 +1,15 @@
 ---
 name: reviewer
-description: Review skill for the multi-agent code workflow. Part A is the default review by Gemini 4 Carbon — checks one task's worker output against its plan and acceptance criteria (plan conformance only) and returns pass, flagged or escalated. Part B is the escalation review by Gemini 4 Argon — a deep dive on security, concurrency, deserialisation, database migrations and performance for a small, flagged slice of code. Use Part A for every worker output; use Part B only when escalated.
+description: Review skill for the multi-agent code workflow. Part A is the default review by the orchestrator model — checks one task's worker output against its plan and acceptance criteria (plan conformance only) and returns pass, flagged or escalated. Part B is the escalation review by a separate escalation call (it may run on the same model as the orchestrator) — a deep dive on security, concurrency, deserialisation, database migrations and performance for a small, flagged slice of code. Use Part A for every worker output; use Part B only when escalated.
 ---
 
 # Reviewer Skill
 
-Two roles in one file. **Load only your part**: Carbon follows Part A, Argon follows Part B (Part B is self-contained). Review exactly one task per call. All review output is in English; the orchestrator translates anything shown to the human.
+Two roles in one file. **Load only your part**: the default reviewer follows Part A, the escalation reviewer follows Part B (Part B is self-contained). Review exactly one task per call. All review output is in English; the orchestrator translates anything shown to the human.
 
 ---
 
-# Part A — Default review (Carbon)
+# Part A — Default review (orchestrator)
 
 ## A1. Scope: plan conformance only
 
@@ -22,7 +22,7 @@ You are comparing the worker's output against **your own plan**. Check:
 5. **Logic vs. spec:** the visible logic does what the spec says. Only obvious spec contradictions count here.
 6. **Summary honesty:** the worker's summary matches the diff.
 
-Do **not** deep-review runtime bugs, security, race conditions, or performance. That is Argon's job. You may only *flag* a concrete suspicion for escalation (A3).
+Do **not** deep-review runtime bugs, security, race conditions, or performance. That is the escalation reviewer's job. You may only *flag* a concrete suspicion for escalation (A3).
 
 Review the cumulative diff for the task (the harness supplies it). On a retry, first confirm each previous issue is fixed, then check that the fix introduced no new conformance problem.
 
@@ -32,13 +32,13 @@ Review the cumulative diff for the task (the harness supplies it). On a retry, f
 |---|---|---|
 | `pass` | All criteria met, no conformance issues | mark `done` |
 | `flagged` | One or more conformance failures | retry worker with `issues` (max 2 retries) |
-| `escalated` | Conformance is clean (or retries are exhausted) and Argon review is required | send to Argon |
+| `escalated` | Conformance is clean (or retries are exhausted) and deep review is required | send to the escalation reviewer |
 
 Choose `escalated` only when the diff conforms and either:
 - the task has an auto-escalation tag (`auth`, `concurrency`, `deserialisation`, `db_migration`), or the worker's `SENSITIVE` line reports one of these (verify against the diff; an unreported but visible case also counts), or
 - you have a **concrete, nameable** deep concern (e.g. "token compared with `==`, possible timing issue in `verify()`"; "shared dict mutated without lock in `flush()`"). Vague unease is not grounds. `db` and `perf_critical` tags escalate only via this explicit flag.
 
-If conformance fails on a sensitive task, return `flagged` first; escalate the corrected diff later. Argon should see only a conformance-clean diff, once.
+If conformance fails on a sensitive task, return `flagged` first; escalate the corrected diff later. The escalation reviewer should see only a conformance-clean diff, once.
 
 ## A3. Output format
 
@@ -58,24 +58,26 @@ summary: <≤60 words>
 Rules:
 - `issues` must be specific and actionable; the harness forwards **only** this list to the worker as `feedback`. Name the file and hunk. State the fix, not just the problem. No style opinions.
 - `issues` is empty on `pass`. `escalate` is `none` unless `result: escalated`.
-- When `escalated`, `escalate` names the exact file/hunk for Argon. The harness builds Argon's input from: your `summary` + `escalate` reason + the flagged hunk(s) + the task spec, capped at ~50K tokens. Never request the full codebase for Argon.
+- When `escalated`, `escalate` names the exact file/hunk for the escalation reviewer. The harness builds the escalation reviewer's input from: your `summary` + `escalate` reason + the flagged hunk(s) + the task spec, capped at ~50K tokens. Never request the full codebase for the escalation reviewer.
 - Be terse. No restating of the diff.
 
-## A4. Handling Argon's verdict
+## A4. Handling the escalation verdict
 
 - `pass` → task `done`.
 - `fail` → forward the `blocker`/`major` findings to the worker as `feedback` (counts as a retry). `minor` findings go in the final summary, not a retry.
-- `need_context` → supply the named items once; if Argon still cannot decide, treat as `fail` for human attention.
+- `need_context` → supply the named items once; if the escalation reviewer still cannot decide, treat as `fail` for human attention.
 
 ---
 
-# Part B — Escalation review (Argon)
+# Part B — Escalation review (escalation reviewer)
 
 You are the deep reviewer. You receive a small slice, not a codebase:
 
 - the task spec and acceptance criteria,
-- Carbon's review summary and the reason for escalation,
+- the orchestrator's review summary and the reason for escalation,
 - the flagged file/hunk(s) (with minimal surrounding context).
+
+You are a fresh call with no memory of the orchestrator's reasoning. Even if you run on the same model, judge the code on its own: do not assume the orchestrator's summary is complete or correct, and do not defer to its conclusions.
 
 Conformance is already verified. **Do not repeat it** and do not comment on style, naming or structure.
 
@@ -101,13 +103,13 @@ Focus on the area named in the escalation reason, then the categories that apply
 ## B3. Output format
 
 ```
-<argon_verdict task="3">
+<escalation_verdict task="3">
 verdict: pass | fail | need_context
 findings:
 - sev: blocker|major|minor | cat: security|concurrency|deserialisation|db|perf | where: path:function/hunk | issue: <what is wrong> | scenario: <how it fails> | fix: <minimal fix>
 need_context:
 - <path or symbol>
-</argon_verdict>
+</escalation_verdict>
 ```
 
 `findings` is empty on `pass`; `need_context` is empty unless `verdict: need_context`.

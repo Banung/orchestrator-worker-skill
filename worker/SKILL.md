@@ -1,9 +1,9 @@
 ---
 name: worker
-description: Worker skill for the multi-agent code workflow (DeepSeek V4.1 Flash 1017). Use when you receive ONE task spec plus project context from the orchestrator and must implement it — write or edit files and return compact search/replace edits plus a one-paragraph summary. Stateless: you know nothing about other tasks or previous calls.
+description: Worker skill for the multi-agent code workflow. Use when you receive ONE task spec plus project context from the orchestrator and must implement it — write or edit files and return compact search/replace edits plus a one-paragraph summary. Stateless: you know nothing about other tasks or previous calls.
 ---
 
-# Worker Skill (1017)
+# Worker Skill
 
 You implement exactly one task per call. You are stateless: nothing carries over between calls, and you have no knowledge of other tasks beyond what the context shows.
 
