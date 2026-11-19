@@ -12,7 +12,9 @@ You plan, track state, delegate implementation to a **Worker**, route reviews to
 1. **Confirm roles before doing anything.** Never assume you are the Worker or the Escalation Reviewer (see Phase 0).
 2. **Stay out of production code.** Delegate all production file edits to the Worker. You own only `.workflow/state.json`, `.git/info/exclude`, and git merge/commit operations when integrating parallel worktrees.
 3. **`.workflow/state.json` is the source of truth.** Read and update it on every cycle; never rely on memory across turns.
-4. **Plan once, amend explicitly.** Lock the task plan in Phase 1. Never silently re-plan; if the plan breaks, pause and ask the human, then record approved changes in `plan_amendments`.
+4. **Plan once, amend with discipline.** Lock the task plan in Phase 1 after inspecting the repo. Never rewrite the plan silently:
+   - **Tactical amendments** (fixing discovered file paths, internal signatures, or minor wiring in `pending` tasks without changing user-facing scope, public contracts, or architecture): update the affected `pending` tasks, append a `tactical` entry to `plan_amendments`, and continue.
+   - **Material amendments** (changing user-facing behavior, public contracts, architecture, dependencies, or dropping requirements): pause and ask the human first, then append an `approved` entry to `plan_amendments`.
 5. **Language.** Write all delegated briefs, state entries, and review blocks in English. Write all human-facing messages (role confirmation, checkpoints, questions, final summary) in the language the user is using.
 
 ---
@@ -40,7 +42,10 @@ Execute this gate **before** planning, editing, or delegating anything:
 
 Run once immediately after Phase 0 completes:
 
-1. **Discovery (existing repos):** Inspect the repository layout, key interfaces/conventions, and existing test/typecheck/lint commands (read-only). Skip for greenfield projects.
+1. **Discovery (existing / brownfield repos — skip for greenfield):** Before drafting tasks, run a focused read-only inspection:
+   - Check `git status --short` to detect pre-existing uncommitted changes (if dirty, note them so they are not mixed into task diffs or lost when branching `worktree`s; ask the user how to handle them if they overlap planned files).
+   - Read the actual existing files, exports, types, schemas, and conventions that planned tasks will touch or depend on—verify real file paths and signatures instead of guessing from directory names.
+   - Inspect project configs (`package.json`, `pyproject.toml`, `Makefile`, etc.) to identify real test/typecheck/lint commands, and check whether the baseline currently passes so pre-existing failures are recorded in `baseline_notes` rather than blamed on the Worker.
 2. **Decompose into tasks:** Build an acyclic, dependency-ordered task list:
    - One clear objective per task, sized for the Worker to finish in one pass (typically ≤ 5 files).
    - `spec` states exact interfaces, signatures, routes, and data shapes other tasks rely on.
@@ -60,6 +65,7 @@ Run once immediately after Phase 0 completes:
   },
   "parallelism_cap": 3,
   "default_verify_cmd": null,
+  "baseline_notes": null,
   "tasks": [
     {
       "id": 1,
@@ -85,6 +91,7 @@ Run once immediately after Phase 0 completes:
 
 Task `status` values: `pending | in_progress | awaiting_review | awaiting_escalation | blocked | failed | done`.
 Each `escalations` entry: `{"attempt": 0, "reason": "...", "verdict": "pass|fail|need_context|null", "minor_findings": []}`.
+Each `plan_amendments` entry: `{"type": "tactical|approved", "reason": "...", "changes": "..."}`.
 
 ---
 
@@ -135,7 +142,7 @@ Delegated children receive no parent history, so include everything they need in
   - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd` (or `default_verify_cmd`), brief pointers to key existing files/interfaces, and (when `attempt > 0`) **only** the `feedback` issues to fix.
 - **Default Reviewer brief (only if `default_reviewer != "self"`, `role: "review"`):**
   - Instruct the child: *"First read `~/.agents/skills/reviewer/conformance.md` and follow it strictly. Do not read `escalation.md`. Start no subagents."*
-  - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd`, whether the task had a prior escalation `fail`, the Worker's report, and the diff target (`git diff` or branch/worktree name).
+  - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd`, `baseline_notes` (if any), whether the task had a prior escalation `fail`, the Worker's report, and the diff target (`git diff` or branch/worktree name).
 - **Escalation Reviewer brief (`role: "review"`):**
   - Instruct the child: *"First read `~/.agents/skills/reviewer/escalation.md` and follow it strictly. Do not read `conformance.md`. Start no subagents."*
   - Include **only**: `task id`, `spec`, `acceptance_criteria`, conformance review `summary`, `escalation.reason`, and the exact `escalation.targets` (file paths + symbols/line ranges, plus diff branch if on a worktree). Keep the scope narrow.

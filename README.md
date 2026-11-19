@@ -39,7 +39,7 @@ Orchestrator (Phase 2)  ->  delegate_task (Worker) -> Default Review (conformanc
 ```
 
 1. **Role confirmation (Phase 0).** Queries `orchestrator_capabilities` and confirms `worker`, `default_reviewer` (`self` or separate model), and `escalation_reviewer`.
-2. **Discovery & planning (Phase 1, once).** Inspects an existing repo's structure and test/lint commands, decomposes the project into an acyclic task graph with interfaces, expected `files`, `acceptance_criteria`, `verify_cmd`, and `risk_tags`, and initializes `.workflow/state.json` (excluded from git via `.git/info/exclude`).
+2. **Discovery & planning (Phase 1, once).** On existing (brownfield) repos, checks `git status`, reads real target files/interfaces/conventions, and records `baseline_notes` for pre-existing test/build state before decomposing the project into an acyclic task graph with expected `files`, `acceptance_criteria`, `verify_cmd`, and `risk_tags`. Initializes `.workflow/state.json` (excluded from git via `.git/info/exclude`). Tactical adjustments to downstream `pending` tasks discovered mid-flight are logged in `plan_amendments`; material scope/architecture changes still pause for human approval.
 3. **Delegation & parallelism (Phase 2).** Dispatches `delegate_task` (`mode: "async"`) for ready tasks:
    - Single task: `isolation: "shared"`.
    - Parallel independent tasks (disjoint `files`, up to `parallelism_cap = 3`): `isolation: "worktree"` (committing completed prerequisites first and merging passing worktrees back) or sequential `shared` if no intermediate commits are desired.
@@ -63,6 +63,7 @@ State lives on disk in the target repository (excluded via `.git/info/exclude` s
   },
   "parallelism_cap": 3,
   "default_verify_cmd": "npm test",
+  "baseline_notes": null,
   "tasks": [
     {
       "id": 1,

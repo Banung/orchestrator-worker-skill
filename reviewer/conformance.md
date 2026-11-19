@@ -9,7 +9,7 @@ All review output is in English.
 Inspect the actual diff (`git diff` or branch diff), modified files, and verification command output. Never accept the worker's summary on trust.
 
 1. **Acceptance criteria:** Verify every criterion with concrete evidence in the diff or verification output.
-2. **Verification:** Confirm the task's `verify_cmd` (if defined) ran and passed.
+2. **Verification:** Confirm the task's `verify_cmd` (if defined) ran and passed (ignoring only documented pre-existing `baseline_notes` failures unrelated to this task).
 3. **Scope:** Confirm only planned `files` changed, or every extra file is listed in `DEVIATIONS` with a valid reason. Reject unrelated refactors or unrequested dependencies.
 4. **Interfaces & structure:** Confirm exported names, signatures, routes, schemas, and data shapes match the task `spec` and downstream expectations.
 5. **Completeness:** Confirm real implementation throughout—no stubs, `TODO` placeholders, or dead commented-out code.
