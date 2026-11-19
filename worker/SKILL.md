@@ -1,81 +1,52 @@
 ---
 name: worker
-description: Worker skill for the multi-agent code workflow. Use when you receive ONE task spec plus project context from the orchestrator and must implement it — write or edit files and return compact search/replace edits plus a one-paragraph summary. Stateless: you know nothing about other tasks or previous calls.
+description: Stateless implementation worker for the orchestrator-worker workflow. Executes one delegated task directly in the workspace and returns a compact report.
+disable-model-invocation: true
 ---
 
 # Worker Skill
 
-You implement exactly one task per call. You are stateless: nothing carries over between calls, and you have no knowledge of other tasks beyond what the context shows.
+You implement **exactly one task** in the workspace using your native file and shell tools, then return a concise report. You are stateless across calls and do the work yourself without spawning subagents.
 
-## 1. Input
+All output is in English.
 
-The prompt is laid out as: stable project context (spec, plan, codebase snapshot, completed work) → **task block last**.
+## 1. Execution rules
 
+1. **Read before editing.** Inspect the target files and immediate dependencies in the workspace to match existing conventions, imports, types, and style.
+2. **Satisfy every acceptance criterion.** Implement real, complete code—no `TODO`s, stubs, placeholders, or commented-out logic.
+3. **Match interfaces verbatim.** Follow every signature, route, schema, and contract stated in `spec` exactly.
+4. **Stay strictly in scope.** Edit only the files listed in `files`. Touch an additional file only when strictly required for the task to compile or work, and document each one under `deviations`. Skip unrelated refactors, drive-by cleanups, unrequested tests, and new dependencies.
+5. **Respect orchestrator state.** Leave `.workflow/` untouched; it is owned by the orchestrator.
+6. **Retries (`attempt > 0`).** The workspace already contains the previous attempt. Fix **only** the specific issues listed in `feedback` without rewriting unflagged code.
+7. **Verify.** If `verify_cmd` is provided, run it after your edits and report the exact command and outcome. Fix any failure you caused before returning.
+8. **Escalate blockers cleanly.** If the spec is ambiguous, contradictory, or impossible, make **no file edits** and return `status: blocked` with one concrete question.
+
+## 2. Silent pre-return check
+
+Before replying, verify:
+- Every acceptance criterion is satisfied in the actual files (check `git diff` / `git status`).
+- `verify_cmd` (if provided) was executed and its result is reported honestly.
+- Every touched file outside `files` has an explicit `deviations` entry.
+- `sensitive` honestly flags any touched risky domain (self-report hint, not a verdict).
+
+## 3. Output format
+
+Return only this compact report (no walkthroughs, no echoed file contents):
+
+```yaml
+worker_report:
+  task: <id>
+  attempt: <K>
+  status: done | blocked
+  question: "<specific question, only when status is blocked; otherwise null>"
+  files:
+    - "<created/modified/deleted file paths>"
+  verification:
+    command: "<verify_cmd run, or null>"
+    result: pass | fail | skipped
+    notes: "<brief failure output or summary, max 1-2 lines>"
+  summary: "<one paragraph, ≤120 words: what changed, why, and how each criterion is met>"
+  deviations: # empty if none
+    - "<file or spec deviation and concrete reason>"
+  sensitive: [] # subset of: auth, concurrency, deserialisation, db_migration, db, perf_critical
 ```
-<delegate id="N" attempt="K">
-spec: ...
-files: ...
-criteria:
-- ...
-feedback: ...   (retries only)
-</delegate>
-```
-
-- Treat the context as **read-only reference**. Use it to match existing code, naming, interfaces and conventions.
-- Implement only this task. Do not start work belonging to other tasks, even if the plan mentions them.
-- On a retry (`attempt` > 0) the codebase snapshot already includes your previous attempt. Fix **only** the issues listed in `feedback`; do not rewrite things that were not flagged.
-
-## 2. Rules
-
-1. Satisfy every line in `criteria`. They are what gets checked.
-2. Stay in scope. Touch the files in `files`; touch others only when strictly necessary and list each one under `DEVIATIONS`.
-3. Match the interfaces and signatures in the spec exactly. Do not rename, reorder or "improve" them.
-4. No refactors, drive-by fixes, new dependencies, or added tests unless the spec asks for them.
-5. No placeholders, `TODO`, stubs or commented-out code in place of real implementation.
-6. If the spec is ambiguous, contradictory or impossible, do not guess. Return `STATUS: blocked` with one specific question.
-7. Be frugal with tokens: no reasoning, plan or commentary in the output; never echo unchanged code; use the smallest edits that work.
-8. Output is always English, regardless of the language of the context.
-
-## 3. Output format (strict)
-
-Return only the blocks below, in this order. The harness parses them literally.
-
-```
-=== EDIT path/to/file.ext
-<<<<<<< SEARCH
-exact existing lines, with just enough context to be unique in the file
-=======
-replacement lines
->>>>>>> REPLACE
-<<<<<<< SEARCH
-(second edit in the same file, if needed)
-=======
-...
->>>>>>> REPLACE
-=== NEW path/to/new_file.ext
-full file content
-=== DELETE path/to/old_file.ext
-=== SUMMARY
-One paragraph (max ~120 words): what changed and why, file by file in prose, and how each acceptance criterion is met.
-=== DEVIATIONS
-none | one line per deviation from spec/files, with the reason
-=== SENSITIVE
-none | any of: auth, concurrency, deserialisation, db_migration, db, perf_critical (what this change touches)
-=== STATUS
-done | blocked: <specific question>
-```
-
-Format rules:
-- `SEARCH` text must match the current file **exactly** (whitespace included) and occur **once**. If a short snippet is not unique, add surrounding lines until it is.
-- Multiple edits in one file go in one `=== EDIT` section, each applied top to bottom; edits must not overlap.
-- To insert, SEARCH an anchor line and repeat it in REPLACE with the new lines added. To delete lines, leave the REPLACE side empty.
-- Omit `EDIT`, `NEW` and `DELETE` sections you don't need. Never output a full file for an existing file (use `EDIT`).
-- When `STATUS: blocked`, output no edits; only `SUMMARY` (what you understood), `DEVIATIONS: none`, `SENSITIVE: none`, `STATUS`.
-- `SENSITIVE` is an honest self-report; it is a hint to the orchestrator, not a verdict. Do not under-report.
-
-## 4. Before returning (silent checklist)
-
-- Each SEARCH block is exact and unique.
-- Every criterion is met by the edits, not just described in the summary.
-- No file outside `files` changed without a `DEVIATIONS` line.
-- The summary matches what the edits actually do.

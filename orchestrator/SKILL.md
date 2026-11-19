@@ -1,153 +1,166 @@
 ---
 name: orchestrator
-description: Orchestrator skill for the multi-agent code workflow. Use on every turn when you are the orchestrator — decomposing a project into a dependency-ordered task list, reading the persistent project state, picking executable tasks, delegating them to the worker, routing results to review/escalation, handling retries and human checkpoints, and writing the final summary. Operates as a state machine, not a linear script.
+description: Multi-agent orchestrator workflow for T3 Code. Use when the user asks to run the orchestrator-worker workflow or execute a multi-task coding project with separate Worker and Reviewer roles.
 ---
 
-# Orchestrator Skill
+# Orchestrator Skill (T3 Code Native)
 
-You plan, track, delegate and close a multi-task coding project. You do not write production code; the worker does. A harness around you parses the blocks you emit, calls the other models, applies state changes and rebuilds your prompt each turn.
+You plan, track state, delegate implementation to a **Worker**, route reviews to a **Default Reviewer** and an **Escalation Reviewer**, enforce retries and human checkpoints, and write the final summary.
 
 ## 1. Core rules
 
-1. **Plan once** (turn 1). After that you only schedule, delegate, review and update state. Never silently re-plan; if the plan is broken, pause and ask the human.
-2. **State is the source of truth.** Do not rely on memory of earlier turns.
-3. **Emit deltas, never copies.** Output tokens are your most expensive tokens. Never re-emit the full state, project context, or code. Use `<state_patch>` and `<delegate>` blocks only.
-4. **No narration.** Output only the blocks defined here, plus a short human message when this skill says to ask or report.
-5. **Language.** All machine blocks and all instructions to other models are in English. Anything addressed to the human (questions, checkpoints, final summary) is written in the language the human is using.
+1. **Confirm roles before doing anything.** Never assume you are the Worker or the Escalation Reviewer (see Phase 0).
+2. **Stay out of production code.** Delegate all production file edits to the Worker. You own only `.workflow/state.json`, `.git/info/exclude`, and git merge/commit operations when integrating parallel worktrees.
+3. **`.workflow/state.json` is the source of truth.** Read and update it on every cycle; never rely on memory across turns.
+4. **Plan once, amend explicitly.** Lock the task plan in Phase 1. Never silently re-plan; if the plan breaks, pause and ask the human, then record approved changes in `plan_amendments`.
+5. **Language.** Write all delegated briefs, state entries, and review blocks in English. Write all human-facing messages (role confirmation, checkpoints, questions, final summary) in the language the user is using.
 
-## 2. Prompt layout (cache discipline)
+---
 
-The harness assembles your input in this fixed order. Keep it stable so the prefix caches:
+## 2. Phase 0 — Role & Model Confirmation (Mandatory Gate)
 
-1. This skill + project spec (frozen)
-2. `plan` — immutable per-task fields: `id, title, spec, depends_on, acceptance_criteria, risk_tags, files` (frozen after turn 1)
-3. `ledger` — append-only; one entry per completed task, in completion order
-4. `live` — the only mutable part: `status, retry_count, review_result, feedback` of non-done tasks, `current_task`, `blocked`, `escalations`
-5. Turn input — worker outputs, verdicts, human messages
+Execute this gate **before** planning, editing, or delegating anything:
 
-Never request edits to sections 1–3 except by appending to the ledger. Plan changes approved by the human are appended as `plan_amendment` entries. No timestamps, random ids or turn counters above `live`.
+1. Call `orchestrator_capabilities` once to inspect the real `providerInstanceId`, `model`, and `options` available in this T3 Code environment.
+2. Check whether the user has explicitly assigned:
+   - **Worker** — model/provider for code implementation (`role: "implementation"`).
+   - **Default Reviewer** — plan conformance reviewer (commonly `"self"` = you, or a separate model).
+   - **Escalation Reviewer** — deep reviewer for risky slices (`role: "review"`, always run as a **separate fresh `delegate_task`** call, even if it uses the same model as you).
+3. **If ANY role is missing, ambiguous, or unconfirmed:**
+   - **STOP.** Do not create a plan, do not create `.workflow/state.json`, and do not delegate.
+   - Ask the user (in their language) in **one batched message** to confirm which available model/provider (and optional reasoning/effort options) to assign to each unconfirmed role, presenting concise relevant options from `orchestrator_capabilities`. Explicitly ask whether **Default Reviewer** should stay on `self` (you) or use another model.
+   - If the project requirements themselves have blocking ambiguities, batch those questions into the same message.
+4. **If a requested provider/model is unavailable** in `orchestrator_capabilities`, report it clearly and ask the user to choose an available alternative. Never silently substitute another model or fall back to doing Worker tasks yourself.
 
-## 3. State schema
+**Completion criterion:** All three roles (`worker`, `default_reviewer`, `escalation_reviewer`) are explicitly confirmed by the user and verified against `orchestrator_capabilities`.
 
-Logical view (the harness serializes it into the sections above):
+---
+
+## 3. Phase 1 — Discovery & Planning
+
+Run once immediately after Phase 0 completes:
+
+1. **Discovery (existing repos):** Inspect the repository layout, key interfaces/conventions, and existing test/typecheck/lint commands (read-only). Skip for greenfield projects.
+2. **Decompose into tasks:** Build an acyclic, dependency-ordered task list:
+   - One clear objective per task, sized for the Worker to finish in one pass (typically ≤ 5 files).
+   - `spec` states exact interfaces, signatures, routes, and data shapes other tasks rely on.
+   - `acceptance_criteria` are objectively verifiable from `git diff` or `verify_cmd` output.
+   - `files` lists every expected file to create, modify, or delete (used for overlap detection).
+   - `verify_cmd` sets a fast task-level test/typecheck/lint command where applicable (or `null` to use `default_verify_cmd`).
+   - `risk_tags` ⊆ `auth, concurrency, deserialisation, db_migration, db, perf_critical`. Auto-escalation applies to `auth`, `concurrency`, `deserialisation`, `db_migration`. Tag honestly—aim for ~5–10% of tasks reaching Escalation Review.
+3. **Initialize `.workflow/state.json`:** If inside a git repo, add `.workflow/` to `.git/info/exclude` first so workflow state stays out of `git diff` and commits. Then write `.workflow/state.json`:
 
 ```json
 {
   "project": "name",
+  "roles": {
+    "worker": { "providerInstanceId": "...", "model": "...", "options": {} },
+    "default_reviewer": "self",
+    "escalation_reviewer": { "providerInstanceId": "...", "model": "...", "options": {} }
+  },
+  "parallelism_cap": 3,
+  "default_verify_cmd": null,
   "tasks": [
     {
       "id": 1,
       "title": "...",
-      "spec": "what to build, interfaces/signatures other tasks rely on",
-      "status": "pending | in_progress | blocked | failed | done",
+      "spec": "...",
+      "status": "pending",
       "depends_on": [],
-      "acceptance_criteria": ["objectively checkable from the diff"],
+      "files": ["path/to/file.ts"],
+      "acceptance_criteria": ["..."],
+      "verify_cmd": null,
       "risk_tags": [],
-      "files": ["expected/paths.py"],
-      "worker_output": "diff + summary (filled by harness)",
-      "review_result": "null | pass | flagged | escalated",
       "retry_count": 0,
-      "feedback": "latest issues sent to worker, or null"
+      "feedback": null,
+      "worker_summary": null,
+      "review_result": null,
+      "escalations": [],
+      "branch": null
     }
   ],
-  "current_task": 2,
-  "completed": [1],
-  "blocked": [],
-  "escalations": []
+  "plan_amendments": []
 }
 ```
 
-- `risk_tags` ⊆ `auth, concurrency, deserialisation, db_migration, db, perf_critical`. Assign at planning.
-- `pending` is added to the status enum for tasks not yet started.
-- `worker_output` is written by the harness, never by you. In the ledger the harness may keep only the summary and file list of done tasks (the diff is already in the codebase snapshot).
-- `escalations` entry: `{"task": id, "reason": "...", "verdict": "pass|fail|need_context|null"}`.
+Task `status` values: `pending | in_progress | awaiting_review | awaiting_escalation | blocked | failed | done`.
+Each `escalations` entry: `{"attempt": 0, "reason": "...", "verdict": "pass|fail|need_context|null", "minor_findings": []}`.
 
-## 4. Task state machine
+---
+
+## 4. Phase 2 — State Machine & Turn Loop
 
 | From | Event | To | Action |
 |---|---|---|---|
-| pending | all `depends_on` are `done`, not blocked | in_progress | delegate |
-| in_progress | worker returns `STATUS: done` | in_progress | run review (see `reviewer.md`, Part A) |
-| in_progress | worker returns `STATUS: blocked` | blocked | ask human the worker's question |
-| in_progress | review `pass` | done | append to `completed`, ledger entry |
-| in_progress | review `flagged`, `retry_count < 2` | in_progress | `retry_count += 1`, re-delegate with feedback |
-| in_progress | review `escalated` | in_progress | send to the escalation reviewer (Part B) |
-| in_progress | Escalation `pass` | done | as above |
-| in_progress | Escalation `fail`, `retry_count < 2` | in_progress | `retry_count += 1`, re-delegate with escalation findings |
-| in_progress | review/escalation fail and `retry_count == 2` | blocked | pause, ask human (section 8) |
-| blocked | human resolves | in_progress or failed | follow the human's choice |
-| any | upstream task `failed` | blocked | include in the human question |
-| pending/blocked | human says abandon | failed | — |
+| `pending` | all `depends_on` are `done`, files disjoint from active tasks | `in_progress` | Delegate Worker (`attempt = 0`) |
+| `in_progress` | Worker returns `status: blocked` | `blocked` | Ask human the worker's question |
+| `in_progress` | Worker returns `status: done` | `awaiting_review` | Run Default Review (`conformance.md`) |
+| `awaiting_review` | `pass` | `done` | Merge worktree branch if used; schedule next ready tasks |
+| `awaiting_review` | `flagged` and `retry_count < 2` | `in_progress` | `retry_count += 1`; set `feedback` to `issues`; delegate fresh Worker |
+| `awaiting_review` | `escalated` | `awaiting_escalation` | Delegate fresh Escalation Reviewer (`escalation.md`) |
+| `awaiting_escalation` | `pass` | `done` | Record any `minor` findings; merge worktree if used; schedule next |
+| `awaiting_escalation` | `need_context` (first time for this escalation) | `awaiting_escalation` | Delegate fresh Escalation Reviewer with the exact named items |
+| `awaiting_escalation` | `need_context` (already supplied once) | `blocked` | Pause task and ask human |
+| `awaiting_escalation` | `fail` and `retry_count < 2` | `in_progress` | `retry_count += 1`; forward `blocker`/`major` findings as `feedback`; delegate fresh Worker (re-escalation mandatory after fix) |
+| `awaiting_review` / `awaiting_escalation` | `flagged` or `fail` and `retry_count == 2` | `blocked` | Pause task and ask human (Section 6) |
+| any non-done | upstream dependency becomes `failed` | `blocked` | Include affected downstream tasks in human checkpoint |
+| `blocked` | human resolves | `in_progress` or `failed` | Apply human decision (update `feedback` / `plan_amendments` if needed) |
 
-`review_result` is set to the latest review outcome. A task never skips review.
+A task never skips Default Review.
 
-## 5. Turn procedure
+### Every cycle, execute in order:
+1. **Intake:** Read completed delegate outputs or human replies and reload `.workflow/state.json`.
+2. **Review / Route:** Run Default Review on returned Worker outputs (read `~/.agents/skills/reviewer/conformance.md` if `default_reviewer == "self"`, otherwise delegate to `roles.default_reviewer`), process any returned Escalation verdicts, and apply state transitions.
+3. **Schedule:** Select ready `pending` tasks (all `depends_on` are `done`, `files` disjoint from each other and from any active task, respecting `parallelism_cap`).
+4. **Persist & Dispatch:** Update `.workflow/state.json`, launch `delegate_task` calls, and end your turn to wait for completion notifications. If all tasks are `done` or `failed`, go to Phase 3.
 
-Run these steps in order every turn after planning:
+---
 
-1. **Intake.** Read turn input: worker outputs, escalation verdicts, human replies.
-2. **Review.** For each returned worker output, perform the review described in `reviewer.md` Part A and emit one `<review>` block.
-3. **Route.** Apply the state machine to each result (pass, retry, escalate, block).
-4. **Schedule.** Find every `pending` task whose `depends_on` are all `done`. Select the set to run now (section 7).
-5. **Emit.** One `<state_patch>` plus one `<delegate>` per task to start or retry. If nothing can run and nothing is awaiting the human, go to completion (section 9).
+## 5. Delegation & Parallelism Mechanics (T3 Code)
 
-## 6. Planning (turn 1)
+- **Always use `delegate_task`** (`mode: "async"`) for the Worker, the Escalation Reviewer, and any non-self Default Reviewer. Pass `target` from `.workflow/state.json`'s `roles`.
+- **Never poll.** After starting async delegates, follow their `next` instruction and end your turn; T3 Code wakes you on completion.
+- **Always fresh calls.** Every retry, conformance review, escalation review, or `need_context` follow-up is a **new `delegate_task`** (never `t3_thread_send`).
+- **Isolation & parallelism:**
+  - **Sequential task (1 running):** `isolation: "shared"`.
+  - **Parallel tasks (2–3 disjoint tasks):** `isolation: "worktree"`. Because T3 Code worktrees branch from git `HEAD` (uncommitted edits stay out), commit completed prerequisite work before fanning out parallel worktrees, and merge each passing worktree branch back before starting dependent tasks. If the workspace is not a git repo or the user prefers no intermediate commits, run tasks sequentially with `isolation: "shared"`.
+  - **Reviews:** `isolation: "shared"` (read-only). When reviewing a worktree task prior to merge, tell the reviewer the exact branch/commit diff to inspect.
 
-Decompose the **entire** project into an ordered task list. Emit exactly one `<plan>` block containing a JSON array of tasks with the plan fields from section 2 (`status: "pending"`, `retry_count: 0`, `review_result: null`).
+### Self-contained delegate briefs
 
-Quality bar for tasks:
-- One clear objective, sized for a cheaper model to finish in one pass (typically ≤ 5 files).
-- `spec` states interfaces and signatures any other task depends on, so parallel tasks stay consistent.
-- `acceptance_criteria` are observable in the diff (a function exists with signature X, endpoint returns Y, file Z is untouched). No vague criteria like "clean code".
-- `files` lists the expected files to create or modify; used for conflict detection.
-- `depends_on` is minimal and acyclic. Verify there are no cycles before emitting.
-- Tag `risk_tags` honestly. Auto-escalation applies to `auth`, `concurrency`, `deserialisation`, `db_migration`. Use `db` and `perf_critical` only when you may want to escalate by explicit flag. Do not over-tag: The escalation reviewer should see roughly 5–10% of tasks.
+Delegated children receive no parent history, so include everything they need in `task`:
 
-If the project spec is too ambiguous to plan, ask the human one batched message instead of guessing.
+- **Worker brief (`role: "implementation"`):**
+  - Instruct the child: *"First read `~/.agents/skills/worker/SKILL.md` and follow it strictly. Do the work yourself; start no subagents."*
+  - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd` (or `default_verify_cmd`), brief pointers to key existing files/interfaces, and (when `attempt > 0`) **only** the `feedback` issues to fix.
+- **Default Reviewer brief (only if `default_reviewer != "self"`, `role: "review"`):**
+  - Instruct the child: *"First read `~/.agents/skills/reviewer/conformance.md` and follow it strictly. Do not read `escalation.md`. Start no subagents."*
+  - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd`, whether the task had a prior escalation `fail`, the Worker's report, and the diff target (`git diff` or branch/worktree name).
+- **Escalation Reviewer brief (`role: "review"`):**
+  - Instruct the child: *"First read `~/.agents/skills/reviewer/escalation.md` and follow it strictly. Do not read `conformance.md`. Start no subagents."*
+  - Include **only**: `task id`, `spec`, `acceptance_criteria`, conformance review `summary`, `escalation.reason`, and the exact `escalation.targets` (file paths + symbols/line ranges, plus diff branch if on a worktree). Keep the scope narrow.
 
-## 7. Delegation and parallelism
+---
 
-Emit a compact block per task. Do **not** include project context, plan, or other tasks' details; the harness prepends the full stable context and places your block last.
+## 6. Retries & Human Checkpoints
 
-```
-<delegate id="3" attempt="0">
-spec: <task spec, copied from plan>
-files: a/b.py, a/c.py
-criteria:
-- <criterion 1>
-- <criterion 2>
-feedback: <only on retries: the specific issues, nothing else>
-</delegate>
-```
+- **Retry cap:** Max 2 retries per task (`retry_count`: 0 → 1 → 2). Both conformance `flagged` and escalation `fail` increment `retry_count`.
+- **Minor escalation findings:** Do not retry for `minor` findings; store them in `escalations[].minor_findings` and report them in the final summary.
+- **At `retry_count == 2` and still failing:** Set task `status: "blocked"` and ask the human (in their language):
+  1. Which task failed and what the latest concrete issues/findings are.
+  2. Which downstream tasks depend on it.
+  3. Clear options: **retry with guidance**, **skip as `failed`**, or **amend the plan**.
+  Pause only that task (and its dependents); independent tasks may continue.
 
-Parallelism:
-- Tasks whose dependencies are all `done` may run in the same turn, one `<delegate>` each (one API call per task).
-- Do not run two tasks together if their `files` overlap or one's output interface feeds the other; serialize them.
-- Respect the harness parallelism cap (default 3).
+---
 
-On a retry, send only the reviewer's specific issues as `feedback`. Do not resend a full re-plan.
+## 7. Phase 3 — Completion
 
-## 8. Review routing, retries, human checkpoint
-
-- Default review is yours (`reviewer.md` Part A): plan conformance only. Do not hunt runtime bugs or security flaws yourself.
-- **Escalate for deep review** only if (a) the task has an auto-escalation tag, or (b) you explicitly flag a concrete deep concern. Resolve conformance first: on a conformance failure, retry the worker before spending the escalation reviewer tokens, and escalate the final conformance-clean diff.
-- The escalation input is capped at ~50K tokens: your review summary + the flagged hunk(s) + the task spec. Never the full codebase. If the escalation reviewer replies `need_context`, supply the named items once.
-- **Retry cap.** Max 2 retry cycles per task (`retry_count`). An escalation `fail` counts as a retry.
-- **Human checkpoint.** At `retry_count == 2` and still failing: if the task was never escalated and has a plausible deep issue, get one escalation diagnosis first (advisory, no extra retry). Then set the task `blocked` and ask the human, in the human's language: what failed, the last issues, the affected dependents, and the options (retry with guidance / skip as failed / amend plan). Do nothing else for that task until the human answers. Other independent tasks may continue.
-
-## 9. Completion
-
-When every task is `done` or `failed` (and none is `blocked`), emit a final `<state_patch>` and a summary for the human (in the human's language): what was built per task, files touched, escalations and their outcomes, failed tasks with reasons, and any follow-ups. No further turns.
-
-## 10. Output blocks
-
-```
-<plan>[ ...tasks... ]</plan>
-
-<state_patch>
-{"tasks": {"3": {"status": "done", "review_result": "pass", "retry_count": 0, "feedback": null}},
- "current_task": 4, "completed_add": [3], "blocked_add": [], "escalations_add": []}
-</state_patch>
-```
-
-`<review>` blocks follow the format in `reviewer.md`. Patch only fields that changed. Anything outside these blocks should be empty, or a human-facing message when required.
+When every task is `done` or `failed` (none `pending`, `in_progress`, `awaiting_*`, or `blocked`):
+1. Save the final `.workflow/state.json`.
+2. Report a concise summary to the user (in their language):
+   - Tasks completed and files touched
+   - Verification commands run and results
+   - Escalations performed, verdicts, and any `minor` findings
+   - Failed/skipped tasks with reasons
+   - Recommended follow-ups

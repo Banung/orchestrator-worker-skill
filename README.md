@@ -1,116 +1,113 @@
-# Multi-Agent Code Workflow Skills
+# Multi-Agent Code Workflow Skills (T3 Code Native)
 
-Three skills for an automated, multi-model AI coding workflow: one model plans and reviews, a cheaper model writes the code, and a separate deep-review call is made only for the risky parts. This repository stores the skills and explains how the pieces fit together.
+Three role-based agent skills for running a structured multi-model coding workflow natively inside **T3 Code**: one model plans, tracks state, and verifies conformance; a cheaper/faster model implements tasks in the workspace; and a fresh, isolated deep-review call audits only the risky slices.
 
 ## What's included
 
-- [orchestrator](orchestrator.md): plans the whole project once, keeps a persistent project state, schedules tasks by dependency, delegates them, routes results to review, handles retries, and writes the final summary. It does not write production code.
-- [worker](worker.md): stateless. Receives **one** task spec plus project context, implements it, and returns compact search/replace edits plus a one-paragraph summary.
-- [reviewer](reviewer.md): two roles in one file. **Part A** is the default review (plan conformance only). **Part B** is the escalation review (security, concurrency, deserialisation, database migrations, performance).
+- [orchestrator/SKILL.md](orchestrator/SKILL.md): plans the project once (after discovery on existing repos), confirms model assignments via `orchestrator_capabilities`, tracks state in `.workflow/state.json`, delegates tasks via `delegate_task`, routes reviews and retries, and writes the final summary. Does not write production code.
+- [worker/SKILL.md](worker/SKILL.md): stateless implementation worker. Edits files directly in the workspace using native tools, runs the task verification command, and returns a compact YAML report.
+- [reviewer/SKILL.md](reviewer/SKILL.md): thin router splitting the two review stages into isolated files so neither leaks into the other's context:
+  - [reviewer/conformance.md](reviewer/conformance.md): **Default Reviewer** — plan conformance and verification evidence only.
+  - [reviewer/escalation.md](reviewer/escalation.md): **Escalation Reviewer** — independent deep audit (security, concurrency, deserialisation, database migrations, flagged hot paths) in a fresh delegated call.
 
-## Models and roles
+## Roles & model assignment
 
-| Role | Model | Skill |
+The skills are model-agnostic. Example assignment:
+
+| Role | Typical Model | Skill |
 |---|---|---|
-| Orchestrator + default reviewer | Gemini 4 Argon | `orchestrator.md`, `reviewer.md` Part A |
-| Worker | DeepSeek V4.1 Flash 1017 | `worker.md` |
-| Escalation reviewer | Gemini 4 Argon (separate call, small fresh context) | `reviewer.md` Part B |
+| Orchestrator + Default Reviewer | Strong planning model (e.g., Gemini 4 Argon) | `orchestrator/SKILL.md`, `reviewer/conformance.md` |
+| Worker | Fast / low-cost coding model (e.g., DeepSeek V4.1 Flash) | `worker/SKILL.md` |
+| Escalation Reviewer | Strong reasoning model (fresh isolated `delegate_task` call) | `reviewer/escalation.md` |
 
-The skills are written by role, not by model name, so you can swap models by editing this table and your harness config. This setup targets a Google AI Pro subscription, where Gemini 4 Argon is available and Gemini 4 Carbon (AI Ultra) is not. If you later get Carbon, use it for the orchestrator row and keep Argon as the escalation reviewer; no skill file needs to change.
+### Mandatory role confirmation (Phase 0)
 
-The orchestrator and the escalation reviewer run on the same model, so the escalation call must be a **separate call with its own small context** (see `reviewer.md` Part B). Its value comes from the narrow slice, the deep-review prompt, and independence from the orchestrator's reasoning, not from a stronger model.
+If you invoke the orchestrator without specifying which models should play **Worker**, **Default Reviewer**, and **Escalation Reviewer**, the orchestrator calls `orchestrator_capabilities` to list your real available providers/models and **stops to confirm with you** before planning or delegating anything. It will never silently assume it is the Worker or substitute unavailable models.
 
 ## How it works
 
 ```
-Orchestrator           ->  Worker         ->  Review            ->  pass          -> next task
- plan, state,               one task,          plan conformance     flagged       -> back to worker (max 2 retries)
- delegate                   edits + summary    only                 escalated     -> Escalation review -> pass / fail
+Orchestrator (Phase 0)  ->  confirm roles via orchestrator_capabilities
+Orchestrator (Phase 1)  ->  discover repo -> plan -> write .workflow/state.json
+Orchestrator (Phase 2)  ->  delegate_task (Worker) -> Default Review (conformance.md)
+                              ├── pass      -> mark done -> schedule next
+                              ├── flagged   -> retry Worker with issues (max 2 retries)
+                              └── escalated -> fresh delegate_task (escalation.md)
+                                                 ├── pass         -> mark done
+                                                 ├── fail         -> retry Worker (re-escalation mandatory)
+                                                 └── need_context -> supply named items once
 ```
 
-1. **Plan (turn 1, once).** The orchestrator decomposes the whole project into an ordered task list with dependencies, acceptance criteria, expected files and risk tags.
-2. **Each later turn.** The orchestrator reads the state, reviews any returned worker output, updates state, and delegates every task whose dependencies are `done`. Independent tasks (no shared files) run in parallel.
-3. **Worker.** Implements exactly one task and returns edits, a summary, deviations, a self-reported sensitivity tag, and a status (`done` or `blocked` with a question).
-4. **Review.** The reviewer (the orchestrator model) checks the output against its own plan and acceptance criteria. It does not hunt for runtime bugs or security flaws.
-5. **Escalation.** The escalation reviewer is called only for tasks tagged `auth`, `concurrency`, `deserialisation` or `db_migration`, or when the orchestrator flags a concrete deep concern. Typically 5-10% of tasks. It receives a small slice (the orchestrator's summary, the flagged hunk, the task spec; about 50K tokens max), never the full codebase.
-6. **Retries and humans.** A failed review goes back to the worker with only the specific issues. After 2 failed retries the task is `blocked` and the orchestrator asks you what to do (retry with guidance, skip, or amend the plan).
-7. **Done.** When every task is `done` or `failed`, the orchestrator writes a final summary and the run ends.
+1. **Role confirmation (Phase 0).** Queries `orchestrator_capabilities` and confirms `worker`, `default_reviewer` (`self` or separate model), and `escalation_reviewer`.
+2. **Discovery & planning (Phase 1, once).** Inspects an existing repo's structure and test/lint commands, decomposes the project into an acyclic task graph with interfaces, expected `files`, `acceptance_criteria`, `verify_cmd`, and `risk_tags`, and initializes `.workflow/state.json` (excluded from git via `.git/info/exclude`).
+3. **Delegation & parallelism (Phase 2).** Dispatches `delegate_task` (`mode: "async"`) for ready tasks:
+   - Single task: `isolation: "shared"`.
+   - Parallel independent tasks (disjoint `files`, up to `parallelism_cap = 3`): `isolation: "worktree"` (committing completed prerequisites first and merging passing worktrees back) or sequential `shared` if no intermediate commits are desired.
+4. **Worker.** Implements only its assigned task directly with native tools, runs `verify_cmd`, and returns a compact `worker_report`.
+5. **Default Review (`conformance.md`).** Checks actual `git diff` and verification output against the plan and acceptance criteria. Fixes conformance failures before escalating.
+6. **Escalation Review (`escalation.md`).** Runs in a **fresh `delegate_task`** only when conformance is clean and the task touches `auth`, `concurrency`, `deserialisation`, `db_migration`, previously failed escalation, or triggers a concrete deep concern (~5–10% of tasks).
+7. **Retries & human checkpoints.** Max 2 retries per task (`flagged` or escalation `fail`). At `retry_count == 2` and still failing, the task pauses as `blocked` and asks you whether to retry with guidance, skip as `failed`, or amend the plan.
+8. **Completion (Phase 3).** Once all tasks are `done` or `failed`, writes a final summary in your language covering deliverables, verification results, escalations, minor findings, and any follow-ups.
 
-### Review results
+## Project state (`.workflow/state.json`)
 
-| Result | Meaning | Next step |
-|---|---|---|
-| `pass` | All criteria met, no conformance issues | task `done` |
-| `flagged` | Conformance failure | retry worker with the listed issues |
-| `escalated` | Conformance is clean and deep review is required | send to the escalation reviewer |
-
-## Project state
-
-The orchestrator works from a persistent state object that the harness re-sends every turn:
+State lives on disk in the target repository (excluded via `.git/info/exclude` so `git diff` stays clean):
 
 ```json
 {
   "project": "name",
+  "roles": {
+    "worker": { "providerInstanceId": "...", "model": "...", "options": {} },
+    "default_reviewer": "self",
+    "escalation_reviewer": { "providerInstanceId": "...", "model": "...", "options": {} }
+  },
+  "parallelism_cap": 3,
+  "default_verify_cmd": "npm test",
   "tasks": [
     {
-      "id": 1, "title": "...", "spec": "...",
-      "status": "pending | in_progress | blocked | failed | done",
-      "depends_on": [], "acceptance_criteria": ["..."],
-      "risk_tags": [], "files": [],
-      "worker_output": "diff + summary",
-      "review_result": null, "retry_count": 0, "feedback": null
+      "id": 1,
+      "title": "...",
+      "spec": "...",
+      "status": "pending | in_progress | awaiting_review | awaiting_escalation | blocked | failed | done",
+      "depends_on": [],
+      "files": ["src/example.ts"],
+      "acceptance_criteria": ["..."],
+      "verify_cmd": null,
+      "risk_tags": [],
+      "retry_count": 0,
+      "feedback": null,
+      "worker_summary": null,
+      "review_result": null,
+      "escalations": [],
+      "branch": null
     }
   ],
-  "current_task": 2, "completed": [1], "blocked": [], "escalations": []
+  "plan_amendments": []
 }
 ```
 
-To maximise prompt-cache hits, the harness assembles every prompt in a fixed order: skill and project spec (frozen), plan (frozen), ledger of completed tasks (append-only), live state (the only mutable part), then the current turn input. The orchestrator emits small `<state_patch>` and `<delegate>` blocks instead of re-sending state or context.
-
-## Message formats
-
-| Block | Emitted by | Purpose |
-|---|---|---|
-| `<plan>` | orchestrator | one-time task list |
-| `<delegate>` | orchestrator | one task for the worker (spec, files, criteria, feedback on retries) |
-| `<state_patch>` | orchestrator | state changes only |
-| `=== EDIT / NEW / DELETE / SUMMARY / DEVIATIONS / SENSITIVE / STATUS` | worker | search/replace edits and report |
-| `<review>` | orchestrator | `pass` / `flagged` / `escalated` with specific issues |
-| `<escalation_verdict>` | escalation reviewer | `pass` / `fail` / `need_context` with findings |
-
-The worker uses search/replace blocks instead of unified diffs: they are smaller and do not depend on line numbers, which models often get wrong.
-
-Machine blocks and instructions to other models are in English. Messages to the human (questions, checkpoints, final summary) follow the user's language.
-
-## What you need to provide (the harness)
-
-The skills define behaviour, not plumbing. You need a script or app that:
-
-- builds each prompt in the cache-friendly order above and puts the `<delegate>` block last in the worker prompt;
-- calls the models (one call per delegated task, in parallel when allowed) and parses the blocks;
-- applies `<state_patch>` and fills in `worker_output`;
-- applies the worker's edits to the working tree, rejecting any edit whose SEARCH text is missing or not unique, and keeps the cumulative diff per task for review;
-- builds the escalation reviewer's input from the orchestrator's summary, the flagged hunk and the task spec, and enforces the ~50K token cap;
-- enforces the retry cap and the parallelism cap (default 3), and relays human questions and answers.
-
 ## Installation
 
-Load each skill as the system prompt for its model. For `reviewer.md`, give the orchestrator **Part A** and the escalation reviewer **Part B** to save tokens (each part is self-contained).
-
-If your application uses a skills directory instead, copy each file into its own folder as `SKILL.md`. For applications that support `~/.agents/skills`, run this from the root of this repository:
+Symlink each skill folder into `~/.agents/skills` from the root of this repository (recommended so edits stay in sync):
 
 ```sh
-mkdir -p ~/.agents/skills/orchestrator ~/.agents/skills/worker ~/.agents/skills/reviewer
-cp -i orchestrator.md ~/.agents/skills/orchestrator/SKILL.md
-cp -i worker.md ~/.agents/skills/worker/SKILL.md
-cp -i reviewer.md ~/.agents/skills/reviewer/SKILL.md
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/orchestrator" ~/.agents/skills/orchestrator
+ln -s "$(pwd)/worker"       ~/.agents/skills/worker
+ln -s "$(pwd)/reviewer"     ~/.agents/skills/reviewer
 ```
 
-The `-i` option asks for confirmation before overwriting existing files. In this layout the whole `reviewer` file loads for both roles, which works because each role reads only its own part. Installation paths and frontmatter support may differ between applications.
+Or copy them instead:
+
+```sh
+mkdir -p ~/.agents/skills
+cp -r orchestrator worker reviewer ~/.agents/skills/
+```
+
+`worker` and `reviewer` set `disable-model-invocation: true` so they do not consume context or auto-trigger during ordinary chats; the orchestrator points delegated children directly to their file paths under `~/.agents/skills/`.
 
 ## Notes
 
-- These are instructions for the models, not enforcement. Caps (retries, escalation input size, file-overlap checks) and permissions should also be enforced by the harness.
-- The orchestrator is meant to stay out of the code. Give it no file-writing or build tools.
-- Worker self-reports (`SUMMARY`, `SENSITIVE`) are hints. The orchestrator verifies them against the diff, and you should still check the final results and run your own tests.
-- Skill text is in English for the models. Adjust the language rule if you want a different default for human-facing messages.
+- **Language:** Delegated briefs, state files, and review blocks stay in English for reliability; human-facing messages (role confirmation, checkpoints, final summary) follow the user's language.
+- **State hygiene:** `.workflow/` is excluded locally via `.git/info/exclude` so workflow tracking never pollutes diffs or commits.
+- **Fresh sessions:** Even when the Escalation Reviewer uses the same model as the Orchestrator, it always runs in a fresh `delegate_task` with narrow scope and no orchestrator conversation history.
