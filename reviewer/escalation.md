@@ -10,15 +10,15 @@ All output is in English.
 
 Inspect the flagged file(s) and hunk(s) named in your brief, plus only the immediate surrounding definitions or callers needed to verify a concrete risk. Keep reading tightly scoped rather than scanning the entire repository.
 
-## 2. Audit categories
+## 2. Focused audit lenses
 
-Start with the escalation reason, then check every category that applies to the touched code:
+Audit **strictly the lens(es) listed in `lenses`** in your brief (typically one lens) and skip unlisted categories. Only flag an unlisted category if you stumble across an undeniable `blocker` in the exact lines you are inspecting.
 
-- **Security:** authn/authz bypass, missing permission checks, injection (SQL/command/XSS/path traversal), unsafe input handling, secret exposure, timing leaks, weak crypto or randomness.
-- **Concurrency:** race conditions, check-then-act (TOCTOU), missing/wrong locking, deadlocks, memory visibility/ordering issues, non-atomic state updates, unsafe shared mutable state.
-- **Deserialisation:** untrusted payloads passed to unsafe parsers, missing schema/type/size validation, prototype pollution, resource exhaustion or gadget risks.
-- **Database:** unsafe migrations (table locks, data loss, irreversibility, deploy-ordering hazards), broken transaction boundaries, missing constraints/indexes, severe N+1 queries.
-- **Performance:** only when explicitly flagged as a hot path—algorithmic blowups, blocking I/O on event loops, unbounded memory/queue growth, excessive allocations.
+- **`security`:** authn/authz bypass, missing permission checks, injection (SQL/command/XSS/path traversal), unsafe input handling, secret exposure, timing leaks, weak crypto or randomness.
+- **`concurrency`:** race conditions, check-then-act (TOCTOU), missing/wrong locking, deadlocks, memory visibility/ordering issues, non-atomic state updates, unsafe shared mutable state.
+- **`deserialisation`:** untrusted payloads passed to unsafe parsers, missing schema/type/size validation, prototype pollution, resource exhaustion or gadget risks.
+- **`db`:** unsafe migrations (table locks, data loss, irreversibility, deploy-ordering hazards), broken transaction boundaries, missing constraints/indexes, severe N+1 queries.
+- **`perf`:** only when explicitly flagged as a hot path—algorithmic blowups, blocking I/O on event loops, unbounded memory/queue growth, excessive allocations.
 
 ## 3. Finding bar
 

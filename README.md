@@ -39,15 +39,15 @@ Orchestrator (Phase 2)  ->  delegate_task (Worker) -> Default Review (conformanc
 ```
 
 1. **Role confirmation (Phase 0).** Queries `orchestrator_capabilities` and confirms `worker`, `default_reviewer` (`self` or separate model), and `escalation_reviewer`.
-2. **Discovery & planning (Phase 1, once).** On existing (brownfield) repos, checks `git status`, reads real target files/interfaces/conventions, and records `baseline_notes` for pre-existing test/build state before decomposing the project into an acyclic task graph with expected `files`, `acceptance_criteria`, `verify_cmd`, and `risk_tags`. Initializes `.workflow/state.json` (excluded from git via `.git/info/exclude`). Tactical adjustments to downstream `pending` tasks discovered mid-flight are logged in `plan_amendments`; material scope/architecture changes still pause for human approval.
+2. **Discovery & planning (Phase 1, once).** On existing (brownfield) repos, checks `git status`, reads real target files/interfaces/conventions, and records `baseline_notes` for pre-existing test/build state before decomposing the project into an acyclic task graph with expected `files`, `acceptance_criteria`, `verify_cmd`, and `risk_tags` (avoiding artificial over-splitting on small or tightly coupled changes). Initializes `.workflow/state.json` (excluded from git via `.git/info/exclude`). Tactical adjustments to downstream `pending` tasks discovered mid-flight are logged in `plan_amendments`; material scope/architecture changes still pause for human approval.
 3. **Delegation & parallelism (Phase 2).** Dispatches `delegate_task` (`mode: "async"`) for ready tasks:
    - Single task: `isolation: "shared"`.
-   - Parallel independent tasks (disjoint `files`, up to `parallelism_cap = 3`): `isolation: "worktree"` (committing completed prerequisites first and merging passing worktrees back) or sequential `shared` if no intermediate commits are desired.
+   - Parallel independent tasks (disjoint `files`, up to `parallelism_cap = 3`): `isolation: "worktree"` (committing completed prerequisites first, merging passing worktrees back, and running `default_verify_cmd` after merging a parallel batch) or sequential `shared` if no intermediate commits are desired.
 4. **Worker.** Implements only its assigned task directly with native tools, runs `verify_cmd`, and returns a compact `worker_report`.
 5. **Default Review (`conformance.md`).** Checks actual `git diff` and verification output against the plan and acceptance criteria. Fixes conformance failures before escalating.
-6. **Escalation Review (`escalation.md`).** Runs in a **fresh `delegate_task`** only when conformance is clean and the task touches `auth`, `concurrency`, `deserialisation`, `db_migration`, previously failed escalation, or triggers a concrete deep concern (~5–10% of tasks).
+6. **Escalation Review (`escalation.md`).** Runs in **one focused, fresh `delegate_task`** only when conformance is clean and the task touches `auth`, `concurrency`, `deserialisation`, `db_migration`, previously failed escalation, or triggers a concrete deep concern (~5–10% of tasks). Audits strictly the triggered `lenses` rather than a broad general checklist.
 7. **Retries & human checkpoints.** Max 2 retries per task (`flagged` or escalation `fail`). At `retry_count == 2` and still failing, the task pauses as `blocked` and asks you whether to retry with guidance, skip as `failed`, or amend the plan.
-8. **Completion (Phase 3).** Once all tasks are `done` or `failed`, writes a final summary in your language covering deliverables, verification results, escalations, minor findings, and any follow-ups.
+8. **Completion (Phase 3).** Runs a final local integration check (`default_verify_cmd`, if set) once all tasks are `done` or `failed`, then writes a final summary in your language covering deliverables, verification/integration results, escalations, minor findings, and any follow-ups.
 
 ## Project state (`.workflow/state.json`)
 

@@ -47,6 +47,7 @@ Run once immediately after Phase 0 completes:
    - Read the actual existing files, exports, types, schemas, and conventions that planned tasks will touch or depend on—verify real file paths and signatures instead of guessing from directory names.
    - Inspect project configs (`package.json`, `pyproject.toml`, `Makefile`, etc.) to identify real test/typecheck/lint commands, and check whether the baseline currently passes so pre-existing failures are recorded in `baseline_notes` rather than blamed on the Worker.
 2. **Decompose into tasks:** Build an acyclic, dependency-ordered task list:
+   - **Avoid over-splitting:** Do not break small bug fixes or tightly coupled sequential work into artificial sub-tasks. Keep tightly coupled changes in 1–2 sequential tasks to save orchestrator turns and avoid cross-task friction.
    - One clear objective per task, sized for the Worker to finish in one pass (typically ≤ 5 files).
    - `spec` states exact interfaces, signatures, routes, and data shapes other tasks rely on.
    - `acceptance_criteria` are objectively verifiable from `git diff` or `verify_cmd` output.
@@ -130,7 +131,7 @@ A task never skips Default Review.
 - **Always fresh calls.** Every retry, conformance review, escalation review, or `need_context` follow-up is a **new `delegate_task`** (never `t3_thread_send`).
 - **Isolation & parallelism:**
   - **Sequential task (1 running):** `isolation: "shared"`.
-  - **Parallel tasks (2–3 disjoint tasks):** `isolation: "worktree"`. Because T3 Code worktrees branch from git `HEAD` (uncommitted edits stay out), commit completed prerequisite work before fanning out parallel worktrees, and merge each passing worktree branch back before starting dependent tasks. If the workspace is not a git repo or the user prefers no intermediate commits, run tasks sequentially with `isolation: "shared"`.
+  - **Parallel tasks (2–3 disjoint tasks):** `isolation: "worktree"`. Because T3 Code worktrees branch from git `HEAD` (uncommitted edits stay out), commit completed prerequisite work before fanning out parallel worktrees, and merge each passing worktree branch back before starting dependent tasks. After merging a parallel batch, run `default_verify_cmd` (if set) once to verify cross-lane integration before fanning out the next wave. If the workspace is not a git repo or the user prefers no intermediate commits, run tasks sequentially with `isolation: "shared"`.
   - **Reviews:** `isolation: "shared"` (read-only). When reviewing a worktree task prior to merge, tell the reviewer the exact branch/commit diff to inspect.
 
 ### Self-contained delegate briefs
@@ -143,9 +144,9 @@ Delegated children receive no parent history, so include everything they need in
 - **Default Reviewer brief (only if `default_reviewer != "self"`, `role: "review"`):**
   - Instruct the child: *"First read `~/.agents/skills/reviewer/conformance.md` and follow it strictly. Do not read `escalation.md`. Start no subagents."*
   - Include: `task id`, `attempt`, `spec`, `files`, `acceptance_criteria`, `verify_cmd`, `baseline_notes` (if any), whether the task had a prior escalation `fail`, the Worker's report, and the diff target (`git diff` or branch/worktree name).
-- **Escalation Reviewer brief (`role: "review"`):**
-  - Instruct the child: *"First read `~/.agents/skills/reviewer/escalation.md` and follow it strictly. Do not read `conformance.md`. Start no subagents."*
-  - Include **only**: `task id`, `spec`, `acceptance_criteria`, conformance review `summary`, `escalation.reason`, and the exact `escalation.targets` (file paths + symbols/line ranges, plus diff branch if on a worktree). Keep the scope narrow.
+- **Escalation Reviewer brief (`role: "review"` — 1 focused call per escalated task):**
+  - Instruct the child: *"First read `~/.agents/skills/reviewer/escalation.md` and follow it strictly. Do not read `conformance.md`. Audit ONLY the listed `lenses` and skip unlisted categories. Start no subagents."*
+  - Include **only**: `task id`, `spec`, `acceptance_criteria`, conformance review `summary`, `escalation.lenses`, `escalation.reason`, and the exact `escalation.targets` (file paths + symbols/line ranges, plus diff branch if on a worktree). Keep the scope narrow.
 
 ---
 
@@ -164,10 +165,11 @@ Delegated children receive no parent history, so include everything they need in
 ## 7. Phase 3 — Completion
 
 When every task is `done` or `failed` (none `pending`, `in_progress`, `awaiting_*`, or `blocked`):
-1. Save the final `.workflow/state.json`.
-2. Report a concise summary to the user (in their language):
+1. **Final integration check:** If `default_verify_cmd` is set and multiple tasks completed, run it once locally to verify everything works together (check exit code; inspect only failure output, ignoring documented `baseline_notes`). If a new cross-task regression appears, add one targeted fix task for the Worker (logged in `plan_amendments`) and complete the normal review loop before closing.
+2. Save the final `.workflow/state.json`.
+3. Report a concise summary to the user (in their language):
    - Tasks completed and files touched
-   - Verification commands run and results
+   - Verification and integration check results
    - Escalations performed, verdicts, and any `minor` findings
    - Failed/skipped tasks with reasons
    - Recommended follow-ups

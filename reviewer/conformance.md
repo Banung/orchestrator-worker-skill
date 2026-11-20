@@ -51,6 +51,7 @@ review:
       problem: "<specific conformance or verification failure>"
       fix: "<specific, minimal change required>"
   escalation: # null unless result is escalated
+    lenses: [security | concurrency | deserialisation | db | perf] # include ONLY triggered lens(es)
     reason: "<concrete reason or auto-tag>"
     targets:
       - file: "<path>"
